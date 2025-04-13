@@ -1,6 +1,6 @@
 :{$PORT} {
     log
-    reverse_proxy $FORWARD_URL {
+    reverse_proxy {$FORWARD_URL} {
         header_up Host {upstream_hostport} # Sets the Host header correctly
     }
 }
