@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -13,6 +17,32 @@ func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Log the request details
 		log.Printf("Received request: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+
+		// Check if request has a body and is JSON
+		if r.Body != nil && r.ContentLength > 0 {
+			contentType := r.Header.Get("Content-Type")
+			if strings.Contains(strings.ToLower(contentType), "application/json") {
+				// Read the body (limiting to 1MB to prevent memory issues)
+				bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1048576))
+				if err == nil {
+					// Try to pretty print JSON
+					var jsonData interface{}
+					if json.Unmarshal(bodyBytes, &jsonData) == nil {
+						prettyJSON, err := json.MarshalIndent(jsonData, "", "  ")
+						if err == nil {
+							log.Printf("Request body (JSON):\n%s", string(prettyJSON))
+						} else {
+							log.Printf("Request body (raw): %s", string(bodyBytes))
+						}
+					} else {
+						log.Printf("Request body (raw): %s", string(bodyBytes))
+					}
+					
+					// Replace the body so it can be read again by the proxy
+					r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				}
+			}
+		}
 
 		// Record the start time
 		start := time.Now()
