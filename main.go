@@ -9,9 +9,12 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"time"
 )
+
+var openRouterTarget = "https://openrouter.ai"
 
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -37,7 +40,7 @@ func logRequest(handler http.Handler) http.Handler {
 					} else {
 						log.Printf("Request body (raw): %s", string(bodyBytes))
 					}
-					
+
 					// Replace the body so it can be read again by the proxy
 					r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				}
@@ -71,7 +74,7 @@ func (rw *responseWriter) WriteHeader(statusCode int) {
 	rw.ResponseWriter.WriteHeader(statusCode)
 }
 
-func createReverseProxy(target string) (http.Handler, error) {
+func createReverseProxy(target string, stripPrefix string, prependPrefix string) (http.Handler, error) {
 	targetURL, err := url.Parse(target)
 	if err != nil {
 		return nil, err
@@ -81,6 +84,8 @@ func createReverseProxy(target string) (http.Handler, error) {
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
+		req.URL.Path = rewriteProxyPath(targetURL.Path, req.URL.Path, stripPrefix, prependPrefix)
+		req.URL.RawPath = req.URL.Path
 		req.Host = req.URL.Host // Set the Host header to match the target host
 	}
 
@@ -89,13 +94,66 @@ func createReverseProxy(target string) (http.Handler, error) {
 	return loggedProxy, nil
 }
 
+func rewriteProxyPath(targetBasePath string, requestPath string, stripPrefix string, prependPrefix string) string {
+	trimmedPath := strings.TrimPrefix(requestPath, stripPrefix)
+	if trimmedPath == "" {
+		trimmedPath = "/"
+	}
+
+	rewrittenPath := joinURLPath(prependPrefix, trimmedPath)
+	return joinURLPath(targetBasePath, rewrittenPath)
+}
+
+func joinURLPath(base string, suffix string) string {
+	switch {
+	case base == "" && suffix == "":
+		return "/"
+	case base == "":
+		return ensureLeadingSlash(suffix)
+	case suffix == "":
+		return ensureLeadingSlash(base)
+	default:
+		return ensureLeadingSlash(path.Join(base, suffix))
+	}
+}
+
+func ensureLeadingSlash(value string) string {
+	if value == "" {
+		return "/"
+	}
+
+	if strings.HasPrefix(value, "/") {
+		return value
+	}
+
+	return "/" + value
+}
+
+func createProxyMux(doubaoTarget string) (*http.ServeMux, error) {
+	doubaoProxy, err := createReverseProxy(doubaoTarget, "/doubao", "")
+	if err != nil {
+		return nil, err
+	}
+
+	openRouterProxy, err := createReverseProxy(openRouterTarget, "/openrouter", "/api")
+	if err != nil {
+		return nil, err
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/doubao/v1/", doubaoProxy)
+	mux.Handle("/openrouter/v1/", openRouterProxy)
+
+	return mux, nil
+}
+
 func main() {
 	target := os.Getenv("FORWARD_URL")
 	if target == "" {
 		log.Fatal("FORWARD_URL environment variable is required")
 	}
 
-	proxy, err := createReverseProxy(target)
+	mux, err := createProxyMux(target)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -105,8 +163,8 @@ func main() {
 		port = "80" // Default port if not specified
 	}
 
-	http.Handle("/", proxy)
-
-	log.Printf("Starting reverse proxy server, forwarding requests to %s. Listening on port %s", target, port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	log.Printf("Starting reverse proxy server on port %s", port)
+	log.Printf("Doubao namespace: /doubao/v1/* -> %s/v1/*", target)
+	log.Printf("OpenRouter namespace: /openrouter/v1/* -> %s/api/v1/*", openRouterTarget)
+	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
